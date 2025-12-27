@@ -241,15 +241,60 @@ def main(page: ft.Page):
         expand=True
     )
     
-    # Playback position slider for edit mode
+    # Position slider (overlays on range slider for playback position)
+    def on_position_slider_change(e):
+        """Seek to position when user drags the position slider"""
+        nonlocal current_playback_position, playback_start_time, playback_start_position
+        if state.active_index < 0: return
+        cand = state.candidates[state.active_index]
+        
+        new_pos = float(e.control.value)
+        # No clamping to range - expanding range instead if needed
+        
+        # Check if dragged out of range and expand range
+        range_updated = False
+        if new_pos < cand.start:
+            cand.start = new_pos
+            range_slider.start_value = cand.start
+            range_updated = True
+        elif new_pos > cand.end:
+            cand.end = new_pos
+            range_slider.end_value = cand.end
+            range_updated = True
+            
+        current_playback_position = new_pos
+        position_slider.value = new_pos
+        position_label.value = format_time(new_pos)
+        
+        # Seek video
+        v = get_video_control()
+        if v:
+            if hasattr(v, 'seek'): v.seek(int(new_pos * 1000))
+            elif hasattr(v, 'jump_to'): v.jump_to(int(new_pos * 1000))
+        
+        # Update playback timing
+        import time as time_module
+        playback_start_time = time_module.time()
+        playback_start_position = new_pos
+        
+        try:
+            position_slider.update()
+            position_label.update()
+            if range_updated:
+                range_label.value = f"{format_time(cand.start)} - {format_time(cand.end)}"
+                range_slider.update()
+                range_label.update()
+        except:
+            pass
+    
     position_slider = ft.Slider(
         min=0, max=100,
         value=0,
-        active_color="cyan",
-        inactive_color="#4DFFFFFF",
-        thumb_color="white",
+        thumb_color="cyan",
+        active_color="transparent",  # Hide track color
+        inactive_color="transparent",  # Hide track color
         expand=True,
-        on_change_end=on_position_slider_change
+        on_change=on_position_slider_change  # Update and seek while dragging
     )
     
     # Current position label
@@ -319,21 +364,25 @@ def main(page: ft.Page):
     # Range Editor Overlay
     range_overlay = ft.Container(
         content=ft.Column([
-            # 1. Range Slider (Top) - For adjusting start/end
-            ft.Container(
-                content=range_slider,
-                height=35,
-                padding=ft.padding.only(left=10, right=10),
-                alignment=ft.alignment.center
-            ),
-            
-            # 2. Position Slider (Middle) - For playback position
+            # 1. Position Slider (Top) - Current playback position
             ft.Container(
                 content=ft.Row([
-                    position_label,
-                    ft.Container(content=position_slider, expand=True),
+                    ft.Container(ft.Text("再生位置:", size=11, color="cyan", text_align=ft.TextAlign.RIGHT), width=60, alignment=ft.alignment.center_right),
+                    position_slider,
+                    ft.Container(position_label, width=120, alignment=ft.alignment.center_left),
                 ], spacing=10),
-                height=30,
+                height=35,
+                padding=ft.padding.only(left=10, right=10),
+            ),
+            
+            # 2. Range Slider (Middle) - Range adjustment
+            ft.Container(
+                content=ft.Row([
+                    ft.Container(ft.Text("範囲:", size=11, color="orange", text_align=ft.TextAlign.RIGHT), width=60, alignment=ft.alignment.center_right),
+                    range_slider,
+                    ft.Container(range_label, width=120, alignment=ft.alignment.center_left),
+                ], spacing=10),
+                height=35,
                 padding=ft.padding.only(left=10, right=10),
             ),
             
@@ -407,9 +456,8 @@ def main(page: ft.Page):
         roi_start = max(0.0, cand.start - 60.0)
         roi_end = min(state.duration, cand.end + 60.0)
         
-        # Create NEW RangeSlider to avoid state update issues
-        global range_slider # Update global ref if needed
-        range_slider = ft.RangeSlider(
+        # Create NEW RangeSlider with updated range
+        new_range_slider = ft.RangeSlider(
             min=roi_start, 
             max=roi_end,
             start_value=cand.start,
@@ -420,20 +468,23 @@ def main(page: ft.Page):
             overlay_color="transparent",
             active_color="orange",
             inactive_color="#4DFFFFFF",
-            divisions=None # Continuous
+            divisions=None,
+            expand=True
         )
-
-        # Replace in UI
-        # range_overlay.content is Column
-        # controls[0] is Container (Range Slider)
-        # controls[1] is Container (Position Slider Row)
-        range_overlay.content.controls[0].content = range_slider
         
-        # Setup position slider to match range
+        # Replace range_slider in UI (controls[1] is the range slider container row)
+        range_row = range_overlay.content.controls[1].content  # ft.Row
+        range_row.controls[1] = new_range_slider  # Replace range_slider in row
+        
+        # Update reference so handlers use the new slider
+        nonlocal range_slider
+        range_slider = new_range_slider
+        
+        # Setup position slider - Use same ROI as range slider for visual alignment
         nonlocal current_playback_position, edit_mode_active
         current_playback_position = cand.start
-        position_slider.min = cand.start
-        position_slider.max = cand.end
+        position_slider.min = roi_start  # Same as range slider for alignment
+        position_slider.max = roi_end    # Same as range slider for alignment
         position_slider.value = cand.start
         position_label.value = format_time(cand.start)
         
@@ -446,8 +497,14 @@ def main(page: ft.Page):
         right_pane.visible = False
         range_overlay.visible = True
         
-        # Seek to start
-        play_edit_mode(None)
+        # Seek to start (without playing)
+        v = get_video_control()
+        if v:
+            if hasattr(v, 'seek'): v.seek(int(cand.start * 1000))
+            elif hasattr(v, 'jump_to'): v.jump_to(int(cand.start * 1000))
+            if hasattr(v, 'pause'): v.pause()
+            
+        state.is_playing = False
         
         range_overlay.update()
         page.update()
@@ -655,10 +712,13 @@ def main(page: ft.Page):
                 playback_start_time = time_module.time()
                 playback_start_position = cand.start
         
-        # Update position slider (clamp to range)
+        # Update position cursor (clamp to range)
         clamped_pos = max(cand.start, min(cand.end, current_playback_position))
-        position_slider.value = clamped_pos
         position_label.value = format_time(clamped_pos)
+        
+        # Update position slider value
+        position_slider.value = clamped_pos
+        
         try:
             position_slider.update()
             position_label.update()
