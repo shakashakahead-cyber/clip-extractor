@@ -58,6 +58,9 @@ temp_*.mp4
 .DS_Store
 Thumbs.db
 
+# User config
+config.json
+
 # Installer build
 *.spec
 
