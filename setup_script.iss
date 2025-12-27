@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "クリップ抽出くん ベータ"
-#define MyAppVersion "0.8.0"
+#define MyAppVersion "0.8.1"
 #define MyAppPublisher "Your Name"
 #define MyAppURL "https://www.example.com/"
 #define MyAppExeName "ClipExtractorBeta.exe"
