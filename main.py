@@ -241,17 +241,75 @@ def main(page: ft.Page):
         expand=True
     )
     
-    # Position slider (overlays on range slider for playback position)
-    def on_position_slider_change(e):
-        """Seek to position when user drags the position slider"""
-        nonlocal current_playback_position, playback_start_time, playback_start_position
+    # --- Integrated Slider Logic ---
+    slider_width = 800
+    cursor_width = 16
+    
+    # Current position label (Restored)
+    position_label = ft.Text("", size=11, color="cyan")
+    
+    # Visual part of the cursor
+    cursor_visual = ft.Container(
+        width=cursor_width, height=cursor_width,
+        bgcolor="cyan",
+        border_radius=cursor_width/2,
+        border=ft.border.all(2, "white"),
+        shadow=ft.BoxShadow(spread_radius=1, blur_radius=2, color="black"),
+    )
+
+    # Moveable container (referenced by update logic)
+    # Define container first so logic can reference it
+    cursor_container = ft.Container(
+        content=None, # Set later
+        left=0, top=12,
+    )
+
+    def update_cursor_visual_position():
+        """Update cursor .left based on current_playback_position and ROI"""
+        if state.active_index < 0: return
+        cand = state.candidates[state.active_index]
+        roi_start = max(0.0, cand.start - 60.0)
+        roi_end = min(state.duration, cand.end + 60.0)
+        
+        duration = roi_end - roi_start
+        if duration <= 0: return
+        
+        # Calculate pixel position
+        rel_pos = current_playback_position - roi_start
+        ratio = max(0.0, min(1.0, rel_pos / duration))
+        
+        # Map to 0..(slider_width - cursor_width)
+        px = ratio * (slider_width - cursor_width)
+        
+        cursor_container.left = px
+        try:
+            cursor_container.update()
+        except:
+            pass
+
+    def on_cursor_drag(e: ft.DragUpdateEvent):
+        """Handle cursor dragging for seek and range expansion"""
         if state.active_index < 0: return
         cand = state.candidates[state.active_index]
         
-        new_pos = float(e.control.value)
-        # No clamping to range - expanding range instead if needed
+        nonlocal current_playback_position, playback_start_time, playback_start_position
         
-        # Check if dragged out of range and expand range
+        roi_start = max(0.0, cand.start - 60.0)
+        roi_end = min(state.duration, cand.end + 60.0)
+        roi_duration = roi_end - roi_start
+        if roi_duration <= 0: return
+        
+        # Calculate time delta from pixel delta
+        # Width represents roi_duration
+        px_per_sec = (slider_width - cursor_width) / roi_duration
+        
+        time_delta = e.delta_x / px_per_sec
+        new_pos = current_playback_position + time_delta
+        
+        # Clamp to ROI (physical limit)
+        new_pos = max(roi_start, min(roi_end, new_pos))
+        
+        # Range Expansion Logic
         range_updated = False
         if new_pos < cand.start:
             cand.start = new_pos
@@ -263,7 +321,6 @@ def main(page: ft.Page):
             range_updated = True
             
         current_playback_position = new_pos
-        position_slider.value = new_pos
         position_label.value = format_time(new_pos)
         
         # Seek video
@@ -271,14 +328,14 @@ def main(page: ft.Page):
         if v:
             if hasattr(v, 'seek'): v.seek(int(new_pos * 1000))
             elif hasattr(v, 'jump_to'): v.jump_to(int(new_pos * 1000))
-        
-        # Update playback timing
+
+        # Update timing refs for playback continuity if needed
         import time as time_module
         playback_start_time = time_module.time()
         playback_start_position = new_pos
-        
+
         try:
-            position_slider.update()
+            update_cursor_visual_position()
             position_label.update()
             if range_updated:
                 range_label.value = f"{format_time(cand.start)} - {format_time(cand.end)}"
@@ -286,27 +343,24 @@ def main(page: ft.Page):
                 range_label.update()
         except:
             pass
-    
-    position_slider = ft.Slider(
-        min=0, max=100,
-        value=0,
-        thumb_color="cyan",
-        active_color="transparent",  # Hide track color
-        inactive_color="transparent",  # Hide track color
-        expand=True,
-        on_change=on_position_slider_change  # Update and seek while dragging
+            
+    # Define gesture
+    cursor_gesture = ft.GestureDetector(
+        mouse_cursor=ft.MouseCursor.CLICK,
+        drag_interval=20,
+        on_pan_update=on_cursor_drag,
+        content=cursor_visual
     )
     
-    # Current position label
-    position_label = ft.Text("", size=11, color="cyan")
-    # Position update timer reference
+    # Set content of container
+    cursor_container.content = cursor_gesture
+    # --- Restored Timer and Play Control Logic ---
     position_timer_running = False
     
     def start_position_timer():
         """Start a timer to periodically update position display"""
         nonlocal position_timer_running
-        if position_timer_running:
-            return  # Already running
+        if position_timer_running: return
         position_timer_running = True
         
         import time as time_module
@@ -314,18 +368,22 @@ def main(page: ft.Page):
         def timer_loop():
             while position_timer_running and edit_mode_active and state.is_playing:
                 try:
-                    update_position_display()
+                    # Need to call update_position_display which is defined later? 
+                    # Python binds late, so if defined in main scope it works.
+                    if 'update_position_display' in locals():
+                        update_position_display()
+                    elif 'update_position_display' in globals():
+                        update_position_display()
                 except:
                     pass
-                time_module.sleep(0.2)
+                time_module.sleep(0.1) # Faster update for smooth cursor
         
         threading.Thread(target=timer_loop, daemon=True).start()
-    
+
     def stop_position_timer():
-        """Stop the position update timer"""
         nonlocal position_timer_running
         position_timer_running = False
-    
+
     def play_edit_mode(e):
         if state.active_index < 0: return
         
@@ -333,16 +391,17 @@ def main(page: ft.Page):
         v = get_video_control()
         if v:
             nonlocal current_playback_position, playback_start_time, playback_start_position
-            # Use current position if within range, otherwise start from beginning
-            if current_playback_position < cand.start or current_playback_position > cand.end:
+            
+            # Snap to start if out of range (or at end)
+            if current_playback_position < cand.start or current_playback_position >= cand.end - 0.1:
                 current_playback_position = cand.start
             
-            # Record playback start time for position estimation
+            # Record playback start time
             import time as time_module
             playback_start_time = time_module.time()
             playback_start_position = current_playback_position
             
-            # Seek to current position
+            # Seek
             if hasattr(v, 'seek'): v.seek(int(current_playback_position * 1000))
             elif hasattr(v, 'jump_to'): v.jump_to(int(current_playback_position * 1000))
             
@@ -350,39 +409,51 @@ def main(page: ft.Page):
             if hasattr(v, 'play'): v.play()
             state.is_playing = True
             
-            # Start position tracking timer
             start_position_timer()
-    
+
     def pause_edit_mode(e):
-        """Pause video and stop position timer"""
         v = get_video_control()
         if v and hasattr(v, 'pause'):
             v.pause()
         state.is_playing = False
         stop_position_timer()
+    
+    # -----------------------------------
 
     # Range Editor Overlay
     range_overlay = ft.Container(
         content=ft.Column([
-            # 1. Position Slider (Top) - Current playback position
+            # Integrated Slider Row
             ft.Container(
                 content=ft.Row([
-                    ft.Container(ft.Text("再生位置:", size=11, color="cyan", text_align=ft.TextAlign.RIGHT), width=60, alignment=ft.alignment.center_right),
-                    position_slider,
-                    ft.Container(position_label, width=120, alignment=ft.alignment.center_left),
-                ], spacing=10),
-                height=35,
-                padding=ft.padding.only(left=10, right=10),
-            ),
-            
-            # 2. Range Slider (Middle) - Range adjustment
-            ft.Container(
-                content=ft.Row([
-                    ft.Container(ft.Text("範囲:", size=11, color="orange", text_align=ft.TextAlign.RIGHT), width=60, alignment=ft.alignment.center_right),
-                    range_slider,
+                    # Left Label
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Text("範囲編集", size=12, color="orange", weight=ft.FontWeight.BOLD),
+                            position_label, # reuse position label here
+                        ], spacing=2, alignment=ft.MainAxisAlignment.CENTER),
+                        width=80, alignment=ft.alignment.center_right
+                    ),
+                    
+                    # Stacked Sliders
+                    ft.Container(
+                        width=slider_width,
+                        content=ft.Stack([
+                            # Layer 1: Range Slider inside a container to give it height/alignment
+                            ft.Container(
+                                content=range_slider,
+                                height=40,
+                            ),
+                            # Layer 2: Cursor directly in Stack (only blocks 16px area)
+                            cursor_container
+                        ])
+                    ),
+                    
+                    # Right Label
                     ft.Container(range_label, width=120, alignment=ft.alignment.center_left),
-                ], spacing=10),
-                height=35,
+                    
+                ], spacing=10, alignment=ft.MainAxisAlignment.CENTER),
+                height=50,
                 padding=ft.padding.only(left=10, right=10),
             ),
             
@@ -472,20 +543,25 @@ def main(page: ft.Page):
             expand=True
         )
         
-        # Replace range_slider in UI (controls[1] is the range slider container row)
-        range_row = range_overlay.content.controls[1].content  # ft.Row
-        range_row.controls[1] = new_range_slider  # Replace range_slider in row
+        # Replace range_slider in UI based on new Stack structure
+        # range_overlay.content (Column) -> controls[0] (Container) -> content (Row) -> controls[1] (Container) -> content (Stack) -> controls[0] (Container) -> content
+        integrated_row = range_overlay.content.controls[0].content
+        slider_stack_container = integrated_row.controls[1]
+        slider_stack = slider_stack_container.content
+        range_slider_container = slider_stack.controls[0]
+        range_slider_container.content = new_range_slider
         
         # Update reference so handlers use the new slider
         nonlocal range_slider
         range_slider = new_range_slider
         
-        # Setup position slider - Use same ROI as range slider for visual alignment
+        # Setup position cursor
         nonlocal current_playback_position, edit_mode_active
         current_playback_position = cand.start
-        position_slider.min = roi_start  # Same as range slider for alignment
-        position_slider.max = roi_end    # Same as range slider for alignment
-        position_slider.value = cand.start
+        
+        # Update visual cursor
+        update_cursor_visual_position()
+        
         position_label.value = format_time(cand.start)
         
         range_label.value = f"{format_time(cand.start)} - {format_time(cand.end)}"
@@ -712,15 +788,12 @@ def main(page: ft.Page):
                 playback_start_time = time_module.time()
                 playback_start_position = cand.start
         
-        # Update position cursor (clamp to range)
-        clamped_pos = max(cand.start, min(cand.end, current_playback_position))
-        position_label.value = format_time(clamped_pos)
+        # Update cursor visual
+        update_cursor_visual_position()
         
-        # Update position slider value
-        position_slider.value = clamped_pos
+        position_label.value = format_time(max(cand.start, min(cand.end, current_playback_position)))
         
         try:
-            position_slider.update()
             position_label.update()
         except:
             pass
