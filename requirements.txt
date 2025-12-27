@@ -1,0 +1,12 @@
+flet==0.28.3
+librosa
+numpy
+scipy
+soundfile
+ffmpeg-python
+panns-inference
+torch
+onnx
+onnxruntime-directml
+onnxscript
+

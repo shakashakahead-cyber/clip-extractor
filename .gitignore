@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build outputs
+*.exe
+*.msi
+*.dll
+output/
+
+# Large binary files (download separately)
+*.onnx
+*.onnx.data
+ffmpeg.EXE
+
+# Temporary files
+*.tmp
+*.temp
+temp_*.wav
+temp_analysis.wav
+temp_*.mp4
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Installer build
+*.spec
+
+# Debug/test files
+debug_*.py
+test_*.py
+diagnose_*.py
+detect_*.py
+verify_*.py
+inspect_*.py
+main_full.py
