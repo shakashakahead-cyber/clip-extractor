@@ -67,9 +67,11 @@ def get_recommended_batch_size():
                 if batch < 16: batch = 16 # At least 16 for dedicated
                 
                 # High end keywords?
-                if "9070" in name or "4090" in name or "4080" in name or "7900" in name:
+                if "9070" in name or "4090" in name or "4080" in name or "7900" in name or "6900" in name:
                    if batch < 32: batch = 32
                 elif "xt" in name: # Generic XT usually high end AMD
+                   if batch < 32: batch = 32
+                elif "ti" in name and batch == 32: # 3080 Ti etc
                    if batch < 32: batch = 32
             
             if "intel" in name or "uuhd" in name or "iris" in name:

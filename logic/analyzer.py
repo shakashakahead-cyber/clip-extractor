@@ -2,8 +2,10 @@ import os
 import subprocess
 import numpy as np
 import librosa
+import soundfile as sf
 import onnxruntime as ort
 import csv
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Callable
 from .utils import get_ffmpeg_path, get_resource_path
@@ -124,7 +126,9 @@ class Analyzer:
         
         if status_cb: status_cb("音声データを読み込み中...")
         print(f"Loading audio {wav_path}...")
-        wav_data, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
+        # Use soundfile for faster reading (requires 32000Hz mono wav already)
+        wav_data, sr = sf.read(wav_path, dtype='float32')
+        # wav_data, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
         
         total_samples = len(wav_data)
         
@@ -238,19 +242,31 @@ class Analyzer:
             
             batch_input = batch_input.astype(np.float32)
             
-            try:
-                outputs = self._session.run(None, {input_name: batch_input})
-            except Exception as e:
-                err_msg = str(e)
-                print(f"Inference error: {err_msg}")
-                # Fallback logic if needed, but let's hope pre-check worked.
-                # If Dml crashes here, we might need full fallback.
-                if 'DmlExecutionProvider' in self._session.get_providers():
-                     print("Runtime Fallback to CPU...")
-                     self._session = ort.InferenceSession(os.path.join(os.getcwd(), MODEL_FILENAME), providers=['CPUExecutionProvider'])
-                     outputs = self._session.run(None, {input_name: batch_input})
-                else:
-                    raise e
+            # Silence Optimization
+            # Check max amplitude in batch
+            max_amp = np.max(np.abs(batch_input))
+            # Threshold: 0.005 is roughly -46dB. If max is below this, it's very quiet.
+            if max_amp < 0.005:
+                 # Skip inference, assume zero probability
+                 # Output shape: [batch_size, 527]
+                 # We need to construct dummy output
+                 dummy_output = np.zeros((current_batch_len, 527), dtype=np.float32)
+                 outputs = [dummy_output] # List wrapping to match session.run result
+                 # print(f"Skipping silent batch {i}")
+            else:
+                try:
+                    outputs = self._session.run(None, {input_name: batch_input})
+                except Exception as e:
+                    err_msg = str(e)
+                    print(f"Inference error: {err_msg}")
+                    # Fallback logic if needed, but let's hope pre-check worked.
+                    # If Dml crashes here, we might need full fallback.
+                    if 'DmlExecutionProvider' in self._session.get_providers():
+                         print("Runtime Fallback to CPU...")
+                         self._session = ort.InferenceSession(os.path.join(os.getcwd(), MODEL_FILENAME), providers=['CPUExecutionProvider'])
+                         outputs = self._session.run(None, {input_name: batch_input})
+                    else:
+                        raise e
 
             # Slice output
             clipwise_output = outputs[0][:current_batch_len]
@@ -302,6 +318,9 @@ class Analyzer:
             if progress_cb:
                 percent = 0.15 + (0.8 * (i + batch_size) / num_windows)
                 progress_cb(min(0.95, percent))
+            
+            # Yield to system (UI/Video Playback) to prevent lag
+            time.sleep(0.02)
 
         if not raw_scores:
              return []

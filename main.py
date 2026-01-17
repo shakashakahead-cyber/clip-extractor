@@ -49,6 +49,7 @@ class AppState:
         self.min_score: float = 0.3 # Initial Default
         self.batch_size: int = 32 # Default Batch Size
         self.is_playing: bool = False
+        self.export_mode: str = "concat"
         self.load_config()
 
     def load_config(self):
@@ -121,9 +122,10 @@ def main(page: ft.Page):
         state.min_score = float(e.control.value)
         score_label.value = f"スコアフィルタ: {state.min_score:.2f} 以上"
         score_label.update()
-        render_list_items()
     
     def on_slider_change_end(e):
+        render_list_items()
+        update_export_buttons()
         state.save_config()
 
     score_slider = ft.Slider(
@@ -500,11 +502,20 @@ def main(page: ft.Page):
     
     candidates_list = ft.ListView(expand=True, spacing=2)
     
-    export_btn = ft.ElevatedButton(
-        "選択範囲をエクスポート (個別ファイル)", 
-        icon=ft.Icons.SAVE, 
+    export_separate_btn = ft.ElevatedButton(
+        "個別エクスポート", 
+        icon=ft.Icons.SAVE_ALT, 
         disabled=True
     )
+    
+    export_concat_btn = ft.ElevatedButton(
+        "連結エクスポート", 
+        icon=ft.Icons.MERGE_TYPE, 
+        disabled=True
+    )
+    
+    select_all_btn = ft.ElevatedButton("すべて選択", style=ft.ButtonStyle(padding=5))
+    deselect_all_btn = ft.OutlinedButton("すべて解除", style=ft.ButtonStyle(padding=5))
 
     # --- Event Handlers ---
 
@@ -620,27 +631,66 @@ def main(page: ft.Page):
 
     # --- Event Handlers ---
 
-    def on_export_click(e):
+    def select_all(e):
+        # Only select visible ones based on score
+        visible_indices = [i for i, c in enumerate(state.candidates) if c.score >= state.min_score]
+        state.selected_indices.update(visible_indices)
+        render_list_items()
+        update_export_buttons()
+    
+    def deselect_all(e):
+        state.selected_indices.clear()
+        render_list_items()
+        update_export_buttons()
+
+    def update_export_buttons():
+        # Only count selected items that are visible (score >= min_score)
+        valid_count = 0
+        for idx in state.selected_indices:
+             if idx < len(state.candidates):
+                 if state.candidates[idx].score >= state.min_score:
+                     valid_count += 1
+        
+        has_selection = valid_count > 0
+        export_separate_btn.disabled = not has_selection
+        export_concat_btn.disabled = not has_selection
+        export_separate_btn.update()
+        export_concat_btn.update()
+
+    def on_export_separate_click(e):
+        state.export_mode = "separate"
+        on_export_click_common()
+
+    def on_export_concat_click(e):
+        state.export_mode = "concat"
+        on_export_click_common()
+
+    def on_export_click_common():
         if not state.video_path or not state.selected_indices:
             return
         
         save_file_picker.save_file(
-            dialog_title="保存先 (この名前をベースに連番で保存されます)",
+            dialog_title="保存先 (この名前をベースに保存されます)",
             file_name="highlight.mp4",
             allowed_extensions=["mp4"]
         )
 
     def on_save_result(e: ft.FilePickerResultEvent):
         if e.path:
-            status_text.value = "エクスポート中 (個別ファイル)..."
+            mode_text = "個別" if state.export_mode == "separate" else "連結"
+            status_text.value = f"エクスポート中 ({mode_text})..."
             progress_bar.visible = True
             progress_bar.value = None
-            export_btn.disabled = True
+            export_separate_btn.disabled = True
+            export_concat_btn.disabled = True
             page.update()
             threading.Thread(target=run_export, args=(e.path,)).start()
 
     save_file_picker.on_result = on_save_result
-    export_btn.on_click = on_export_click
+    export_separate_btn.on_click = on_export_separate_click
+    export_concat_btn.on_click = on_export_concat_click
+    select_all_btn.on_click = select_all
+    deselect_all_btn.on_click = deselect_all
 
     def run_export(output_path):
         try:
@@ -651,14 +701,22 @@ def main(page: ft.Page):
             sorted_indices = sorted(list(state.selected_indices))
             for idx in sorted_indices:
                 cand = state.candidates[idx]
+                # Filter out hidden items
+                if cand.score < state.min_score:
+                    continue
                 segments.append(ExportSegment(start=cand.start, end=cand.end))
+            
+            if not segments:
+                show_snack("エクスポート対象がありません (フィルタリングされました)", is_error=True)
+                reset_ui_state(exporting=False)
+                return
             
             exporter.export_highlights(
                 state.video_path, 
                 output_path, 
                 segments, 
                 precise=True, 
-                separate_files=True 
+                separate_files=(state.export_mode == "separate") 
             )
             
             show_snack(f"保存完了: {output_path}周辺")
@@ -673,7 +731,7 @@ def main(page: ft.Page):
         progress_bar.visible = False
         progress_bar.value = 0
         progress_text.visible = False
-        export_btn.disabled = len(state.selected_indices) == 0
+        update_export_buttons()
         page.update()
 
     def show_snack(msg, is_error=False):
@@ -687,8 +745,7 @@ def main(page: ft.Page):
             # If checking, maybe play it too? Optional.
         else:
             state.selected_indices.discard(idx)
-        export_btn.disabled = len(state.selected_indices) == 0
-        export_btn.update()
+        update_export_buttons()
     
     def on_time_edit_str(e, idx, is_start):
         val_str = e.control.value
@@ -893,8 +950,6 @@ def main(page: ft.Page):
         w_sep = 10
         w_end_ctrl = 150 
         w_time_block = w_start_ctrl + w_sep + w_end_ctrl
-        w_reset = 50 
-        w_time_block = w_start_ctrl + w_sep + w_end_ctrl 
         w_reset = 50 
         w_score = 120 # Widened for details
         w_edit = 50
@@ -1182,7 +1237,8 @@ def main(page: ft.Page):
 
     controls = ft.Row([
         file_select_btn,
-        export_btn,
+        export_separate_btn,
+        export_concat_btn,
     ])
     
     def set_ui_locked(locked: bool):
@@ -1190,12 +1246,17 @@ def main(page: ft.Page):
         score_slider.disabled = locked
         # candidates_list.disabled = locked # Flet ListView disabled might not block item clicks, but visual cue
         if locked:
-            export_btn.disabled = True
+            export_separate_btn.disabled = True
+            export_concat_btn.disabled = True
+            select_all_btn.disabled = True
+            deselect_all_btn.disabled = True
             range_overlay.visible = False
             state.active_index = -1
         else:
             # Export btn state depends on selection
-            export_btn.disabled = len(state.selected_indices) == 0
+            update_export_buttons()
+            select_all_btn.disabled = False
+            deselect_all_btn.disabled = False
             
         page.update()
     
@@ -1216,9 +1277,10 @@ def main(page: ft.Page):
     ], expand=True)
     
     # Right Table (Header + List)
+    selection_row = ft.Row([select_all_btn, deselect_all_btn], alignment=ft.MainAxisAlignment.END)
     
     right_pane = ft.Column([
-        results_header_text,
+        ft.Row([results_header_text, selection_row], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         candidates_list
     ], width=650)
 
