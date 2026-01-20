@@ -29,6 +29,7 @@ class Analyzer:
     def __init__(self):
         self._session = None
         self._target_indices = []
+        self._laughter_indices = []
         self._class_names = []
 
     def _load_model(self, batch_size: int = 32):
@@ -89,19 +90,23 @@ class Analyzer:
             raise FileNotFoundError("panns_classes.txt not found")
         
         # Define Targets (PANNs labels are specific)
-        targets = [
-            "Laughter", "Belly laugh", "Chuckle, chortle", "Giggle", "Snicker", 
-            "Cheering", "Applause", "Clapping", "Crowd", "Battle cry", 
-            "Screaming", "Shouting", "Yell"
-        ]
+        targets_laughter = ["Laughter", "Belly laugh", "Chuckle, chortle", "Giggle", "Snicker"]
+        targets_other = ["Cheering", "Applause", "Clapping", "Crowd", "Battle cry", "Screaming", "Shouting", "Yell"]
         
         self._target_indices = []
+        self._laughter_indices = []
         for i, name in enumerate(self._class_names):
             # Case insensitive check
-            if any(t.lower() in name.lower() for t in targets):
+            is_laughter = any(t.lower() in name.lower() for t in targets_laughter)
+            is_other = any(t.lower() in name.lower() for t in targets_other)
+            
+            if is_laughter:
+                self._laughter_indices.append(i)
+                self._target_indices.append(i)
+            elif is_other:
                 self._target_indices.append(i)
         
-        print(f"Target Indices: {len(self._target_indices)} found.")
+        print(f"Target Indices: {len(self._target_indices)} found ({len(self._laughter_indices)} are laughter).")
 
     def extract_audio(self, video_path: str, output_wav_path: str):
         ffmpeg_path = get_ffmpeg_path()
@@ -129,6 +134,7 @@ class Analyzer:
         # Use soundfile for faster reading (requires 32000Hz mono wav already)
         wav_data, sr = sf.read(wav_path, dtype='float32')
         # wav_data, sr = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True)
+        wav_data = np.ascontiguousarray(wav_data, dtype=np.float32)
         
         total_samples = len(wav_data)
         
@@ -141,28 +147,11 @@ class Analyzer:
         num_windows = int(np.ceil((total_samples - window_samples) / hop_samples)) + 1
         if num_windows < 1: num_windows = 1
         
-        # Define Targets (PANNs labels are specific)
-        targets_laughter = ["Laughter", "Belly laugh", "Chuckle, chortle", "Giggle", "Snicker"]
-        targets_other = ["Cheering", "Applause", "Clapping", "Crowd", "Battle cry", "Screaming", "Shouting", "Yell"]
-        
-        self._target_indices = []
-        self._laughter_indices = []
         window_details = []
-        
-        for i, name in enumerate(self._class_names):
-            # Case insensitive check
-            is_laughter = any(t.lower() in name.lower() for t in targets_laughter)
-            is_other = any(t.lower() in name.lower() for t in targets_other)
-            
-            if is_laughter:
-                self._laughter_indices.append(i)
-                self._target_indices.append(i)
-            elif is_other:
-                self._target_indices.append(i)
-        
-        print(f"Target Indices: {len(self._target_indices)} found ({len(self._laughter_indices)} are laughter).")
-        
-        all_scores_time_map = [] 
+        target_indices = np.asarray(self._target_indices, dtype=np.int64)
+        laughter_indices = np.asarray(self._laughter_indices, dtype=np.int64)
+        has_targets = target_indices.size > 0
+        has_laughter = laughter_indices.size > 0
         
         if progress_cb: progress_cb(0.1)
         
@@ -213,7 +202,7 @@ class Analyzer:
             return []
         
         num_windows = len(frames)
-        times = [(i * hop_samples + window_samples/2) / SAMPLE_RATE for i in range(num_windows)]
+        times = (np.arange(num_windows) * hop_samples + (window_samples / 2.0)) / SAMPLE_RATE
         
         print(f"Generated {num_windows} windows. Starting batch inference...")
         
@@ -240,79 +229,78 @@ class Analyzer:
             else:
                 batch_input = batch_windows
             
-            batch_input = batch_input.astype(np.float32)
+            if batch_input.dtype != np.float32:
+                batch_input = batch_input.astype(np.float32, copy=False)
             
-            # Silence Optimization
-            # Check max amplitude in batch
-            max_amp = np.max(np.abs(batch_input))
-            # Threshold: 0.005 is roughly -46dB. If max is below this, it's very quiet.
-            if max_amp < 0.005:
-                 # Skip inference, assume zero probability
-                 # Output shape: [batch_size, 527]
-                 # We need to construct dummy output
-                 dummy_output = np.zeros((current_batch_len, 527), dtype=np.float32)
-                 outputs = [dummy_output] # List wrapping to match session.run result
-                 # print(f"Skipping silent batch {i}")
-            else:
-                try:
-                    outputs = self._session.run(None, {input_name: batch_input})
-                except Exception as e:
-                    err_msg = str(e)
-                    print(f"Inference error: {err_msg}")
-                    # Fallback logic if needed, but let's hope pre-check worked.
-                    # If Dml crashes here, we might need full fallback.
-                    if 'DmlExecutionProvider' in self._session.get_providers():
-                         print("Runtime Fallback to CPU...")
-                         self._session = ort.InferenceSession(os.path.join(os.getcwd(), MODEL_FILENAME), providers=['CPUExecutionProvider'])
-                         outputs = self._session.run(None, {input_name: batch_input})
-                    else:
-                        raise e
+            try:
+                outputs = self._session.run(None, {input_name: batch_input})
+            except Exception as e:
+                err_msg = str(e)
+                print(f"Inference error: {err_msg}")
+                # Fallback logic if needed, but let's hope pre-check worked.
+                # If Dml crashes here, we might need full fallback.
+                if 'DmlExecutionProvider' in self._session.get_providers():
+                     print("Runtime Fallback to CPU...")
+                     self._session = ort.InferenceSession(os.path.join(os.getcwd(), MODEL_FILENAME), providers=['CPUExecutionProvider'])
+                     outputs = self._session.run(None, {input_name: batch_input})
+                else:
+                    raise e
 
             # Slice output
             clipwise_output = outputs[0][:current_batch_len]
             
-            # Process Scores (Vectorized where possible? For now loop is fine as it's small 32 items)
-            # Actually, standardizing this part:
-            for j in range(current_batch_len):
-                prob_vec = clipwise_output[j]
-                
-                # Targets
-                score_laughter = 0.0
-                if self._laughter_indices:
-                    score_laughter = np.max(prob_vec[self._laughter_indices])
-                score_all = np.max(prob_vec[self._target_indices])
-                
-                clip_score = score_all
-                if score_laughter > 0.1:
-                    clip_score = max(clip_score, score_laughter * 1.2)
-                
-                clip_score = np.clip(clip_score * 1.5, 0.0, 1.0)
-                
-                # RMS (already loaded in memory)
-                current_chunk = batch_windows[j]
-                rms = np.sqrt(np.mean(current_chunk**2))
-                rms_score = min(1.0, rms / 0.1)
-                
-                combined_score = 0.6 * clip_score + 0.4 * rms_score
-                raw_scores.append(combined_score)
-                
-                # Capture Details
-                top_class = "Unknown"
-                top_class_score = 0.0
-                
-                # Find max in target indices
-                valid_probs = prob_vec[self._target_indices]
-                if len(valid_probs) > 0:
-                    local_max_idx = np.argmax(valid_probs)
-                    global_idx = self._target_indices[local_max_idx]
-                    top_class = self._class_names[global_idx]
-                    top_class_score = float(valid_probs[local_max_idx])
-                
-                window_details.append({
-                    "top_class": top_class,
-                    "max_score": top_class_score,
-                    "has_laughter": (score_laughter > 0.1)
-                })
+            if has_targets:
+                valid_probs = clipwise_output[:, target_indices]
+                score_all = np.max(valid_probs, axis=1)
+                local_max_idx = np.argmax(valid_probs, axis=1)
+                top_class_scores = valid_probs[np.arange(current_batch_len), local_max_idx]
+                global_idx = target_indices[local_max_idx]
+            else:
+                score_all = np.zeros(current_batch_len, dtype=np.float32)
+                top_class_scores = np.zeros(current_batch_len, dtype=np.float32)
+                global_idx = None
+            
+            if has_laughter:
+                score_laughter = np.max(clipwise_output[:, laughter_indices], axis=1)
+            else:
+                score_laughter = np.zeros(current_batch_len, dtype=np.float32)
+            
+            clip_score = score_all.copy()
+            if has_laughter:
+                laugh_mask = score_laughter > 0.1
+                if np.any(laugh_mask):
+                    clip_score = np.where(laugh_mask, np.maximum(clip_score, score_laughter * 1.2), clip_score)
+            
+            clip_score = np.clip(clip_score * 1.5, 0.0, 1.0)
+            
+            # RMS (already loaded in memory)
+            batch_rms = np.sqrt(np.mean(batch_windows ** 2, axis=1))
+            rms_score = np.minimum(1.0, batch_rms / 0.1)
+            
+            combined_score = (0.6 * clip_score) + (0.4 * rms_score)
+            raw_scores.extend(combined_score.tolist())
+            
+            has_laughter_flags = score_laughter > 0.1
+            if has_targets:
+                batch_details = [
+                    {
+                        "top_class": self._class_names[int(global_idx[k])],
+                        "max_score": float(top_class_scores[k]),
+                        "has_laughter": bool(has_laughter_flags[k])
+                    }
+                    for k in range(current_batch_len)
+                ]
+            else:
+                batch_details = [
+                    {
+                        "top_class": "Unknown",
+                        "max_score": 0.0,
+                        "has_laughter": bool(has_laughter_flags[k])
+                    }
+                    for k in range(current_batch_len)
+                ]
+            
+            window_details.extend(batch_details)
             
             # Progress update
             if progress_cb:
@@ -320,37 +308,27 @@ class Analyzer:
                 progress_cb(min(0.95, percent))
             
             # Yield to system (UI/Video Playback) to prevent lag
-            time.sleep(0.02)
+            # Reduced sleep to minimized overhead while still yielding
+            time.sleep(0.001)
 
         if not raw_scores:
              return []
              
         # 4. Continuity Boost (Post-processing)
         # Add bonus if adjacent segments are also high
-        final_scores = []
-        count = len(raw_scores)
+        raw_scores_arr = np.asarray(raw_scores, dtype=np.float32)
+        count = raw_scores_arr.size
         continuity_bonus = 0.15
         
-        for i in range(count):
-            score = raw_scores[i]
-            
-            # Check previous
-            if i > 0 and raw_scores[i-1] > 0.3:
-                score += continuity_bonus
-                
-            # Check next
-            if i < count - 1 and raw_scores[i+1] > 0.3:
-                score += continuity_bonus
-            
-            final_scores.append(min(1.0, score))
-            
-        # Re-pack into time map for downstream logic (replacing raw with final)
-        # Note: 'times' list contains the center time for each window processed in order.
-        # 'raw_scores' and 'final_scores' are aligned with 'times'.
-        all_scores_time_map = [(times[i], final_scores[i]) for i in range(count)]
+        final_scores = raw_scores_arr.copy()
+        if count > 1:
+            high = raw_scores_arr > 0.3
+            final_scores[1:] += high[:-1] * continuity_bonus
+            final_scores[:-1] += high[1:] * continuity_bonus
+        final_scores = np.minimum(1.0, final_scores)
         
-        times_arr = np.array([x[0] for x in all_scores_time_map])
-        scores_arr = np.array([x[1] for x in all_scores_time_map])
+        times_arr = times[:count]
+        scores_arr = final_scores[:count]
         
         # Sort by time (this might be redundant if times are already sorted, but good for safety)
         sorted_idx = np.argsort(times_arr)
@@ -419,7 +397,7 @@ class Analyzer:
             # times is a list/array
             closest_w_idx = 0
             if len(times) > 0:
-                closest_w_idx = np.abs(np.array(times) - t_peak).argmin()
+                closest_w_idx = np.abs(times - t_peak).argmin()
             
             det = window_details[closest_w_idx] if closest_w_idx < len(window_details) else None
 
