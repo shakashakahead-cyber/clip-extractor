@@ -1129,14 +1129,14 @@ def main(page: ft.Page):
             wav_path = "temp_analysis.wav"
             analyzer.extract_audio(path, wav_path)
             
-            update_status("AI解析中 (PANNs)...")
+            update_status("AI解析中...")
             
             candidates = analyzer.analyze_audio(
                 wav_path, 
                 padding=20.0, 
                 progress_cb=on_progress,
                 status_cb=update_status,
-                batch_size=state.batch_size 
+                batch_size=state.batch_size,
             )
             state.candidates = candidates
             # Save original times for reset fallback
@@ -1164,6 +1164,22 @@ def main(page: ft.Page):
     def finish_analysis(path):
         progress_bar.visible = False
         progress_text.visible = False
+
+        if state.candidates:
+            visible_count = sum(1 for c in state.candidates if c.score >= state.min_score)
+            if visible_count == 0:
+                max_score = max(c.score for c in state.candidates)
+                old_min = state.min_score
+                new_min = max(0.0, min(old_min, max_score * 0.85))
+                if new_min < old_min:
+                    state.min_score = float(round(new_min, 2))
+                    score_slider.value = state.min_score
+                    score_label.value = f"スコアフィルタ: {state.min_score:.2f} 以上"
+                    state.save_config()
+                    show_snack(
+                        f"候補表示のためスコアフィルタを {old_min:.2f} から {state.min_score:.2f} に調整しました",
+                        is_error=False,
+                    )
         
         # Init Player with Full Video Control BEFORE rendering list
         initialize_player(path)

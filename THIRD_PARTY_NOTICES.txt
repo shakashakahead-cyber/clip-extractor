@@ -56,3 +56,15 @@ This software is built using Python and the following libraries:
 - MoviePy (MIT)
 
 (Full license texts can be found in their respective repositories)
+
+================================================================================
+5. EfficientAT (Embedded Components)
+================================================================================
+This software includes portions of EfficientAT for audio tagging inference.
+
+Source: https://github.com/fschmid56/EfficientAT
+License: MIT License
+Author: Florian Schmid
+
+Embedded files are located under:
+logic/third_party/efficientat/

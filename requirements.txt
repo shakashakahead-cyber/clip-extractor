@@ -6,6 +6,8 @@ soundfile
 ffmpeg-python
 panns-inference
 torch
+torchaudio
+torchvision
 onnx
 onnxruntime-directml
 onnxscript
