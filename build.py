@@ -14,10 +14,10 @@ def build():
 
     # 2. Define data to include
     # Format: "source;dest" for Windows
+    # EfficientAT is loaded via dynamic imports from logic/third_party/efficientat,
+    # so include the directory explicitly for packaged runtime.
     datas = [
-        ("panns_classes.txt", "."),
-        ("*.onnx", "."),
-        ("*.onnx.data", "."),
+        ("logic/third_party/efficientat", "logic/third_party/efficientat"),
         # ("ffmpeg.exe", "."), # Removed to avoid GPL distribution issues. User provides ffmpeg.
     ]
     
