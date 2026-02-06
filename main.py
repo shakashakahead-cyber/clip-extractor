@@ -149,6 +149,7 @@ def main(page: ft.Page):
     current_playback_position = 0.0  # Current position in seconds
     playback_start_time = 0.0  # Time when playback started (for position estimation)
     playback_start_position = 0.0  # Position when playback started
+    clip_stop_monitor_running = False
     
     # Helper to access video safely
     def get_video_control():
@@ -158,28 +159,94 @@ def main(page: ft.Page):
         except:
              return None
 
+    def stop_clip_stop_monitor():
+        nonlocal clip_stop_monitor_running
+        clip_stop_monitor_running = False
+
+    def start_clip_stop_monitor():
+        nonlocal clip_stop_monitor_running, current_playback_position, playback_start_time, playback_start_position
+        if clip_stop_monitor_running:
+            return
+        if state.active_index < 0 or state.active_index >= len(state.candidates):
+            return
+
+        clip_stop_monitor_running = True
+        import time as time_module
+
+        def monitor_loop():
+            nonlocal clip_stop_monitor_running, current_playback_position
+            while clip_stop_monitor_running and state.is_playing:
+                if state.active_index < 0 or state.active_index >= len(state.candidates):
+                    break
+                if edit_mode_active:
+                    time_module.sleep(0.05)
+                    continue
+
+                cand = state.candidates[state.active_index]
+                est_pos = playback_start_position + (time_module.time() - playback_start_time)
+                current_playback_position = est_pos
+                if est_pos >= cand.end - 0.03:
+                    v = get_video_control()
+                    if v and hasattr(v, 'pause'):
+                        v.pause()
+                    if v:
+                        if hasattr(v, 'seek'):
+                            v.seek(int(cand.end * 1000))
+                        elif hasattr(v, 'jump_to'):
+                            v.jump_to(int(cand.end * 1000))
+                    state.is_playing = False
+                    current_playback_position = cand.end
+                    break
+                time_module.sleep(0.05)
+            clip_stop_monitor_running = False
+
+        threading.Thread(target=monitor_loop, daemon=True).start()
+
     def play_video(e):
+        nonlocal playback_start_time, playback_start_position
         v = get_video_control()
         if v and hasattr(v, 'play'): 
             v.play()
             state.is_playing = True
+            import time as time_module
+            playback_start_time = time_module.time()
+            if state.active_index >= 0 and state.active_index < len(state.candidates):
+                cand = state.candidates[state.active_index]
+                playback_start_position = max(cand.start, min(cand.end, current_playback_position))
+                start_clip_stop_monitor()
 
     def pause_video(e):
         v = get_video_control()
         if v and hasattr(v, 'pause'): 
             v.pause()
             state.is_playing = False
+            stop_clip_stop_monitor()
 
     def toggle_playback(e):
+        nonlocal playback_start_time, playback_start_position, current_playback_position
         v = get_video_control()
         if v:
             if state.is_playing:
                 if hasattr(v, 'pause'): v.pause()
                 state.is_playing = False
+                stop_clip_stop_monitor()
                 show_snack("一時停止", is_error=False) # Visual feedback
             else:
+                if state.active_index >= 0 and state.active_index < len(state.candidates):
+                    cand = state.candidates[state.active_index]
+                    if current_playback_position < cand.start or current_playback_position > cand.end:
+                        current_playback_position = cand.start
+                        if hasattr(v, 'seek'):
+                            v.seek(int(cand.start * 1000))
+                        elif hasattr(v, 'jump_to'):
+                            v.jump_to(int(cand.start * 1000))
+                    import time as time_module
+                    playback_start_time = time_module.time()
+                    playback_start_position = current_playback_position
                 if hasattr(v, 'play'): v.play()
                 state.is_playing = True
+                if state.active_index >= 0 and state.active_index < len(state.candidates):
+                    start_clip_stop_monitor()
                 show_snack("再生", is_error=False)
         
     def on_volume_change(e):
@@ -418,6 +485,7 @@ def main(page: ft.Page):
         if v and hasattr(v, 'pause'):
             v.pause()
         state.is_playing = False
+        stop_clip_stop_monitor()
         stop_position_timer()
     
     # -----------------------------------
@@ -592,6 +660,7 @@ def main(page: ft.Page):
             if hasattr(v, 'pause'): v.pause()
             
         state.is_playing = False
+        stop_clip_stop_monitor()
         
         range_overlay.update()
         page.update()
@@ -611,6 +680,7 @@ def main(page: ft.Page):
         if v and hasattr(v, 'pause'):
             v.pause()
         state.is_playing = False
+        stop_clip_stop_monitor()
             
         range_overlay.visible = False
         right_pane.visible = True
@@ -782,6 +852,7 @@ def main(page: ft.Page):
             render_list_items()
 
     def play_candidate(idx):
+        nonlocal playback_start_time, playback_start_position, current_playback_position
         # Access the current Video control
         try:
             video_obj = player_stack.controls[0]
@@ -794,6 +865,7 @@ def main(page: ft.Page):
             if hasattr(video_obj, 'pause'):
                  video_obj.pause()
             state.is_playing = False
+            stop_clip_stop_monitor()
             render_list_items() # Update icon to Play
             return
 
@@ -807,11 +879,17 @@ def main(page: ft.Page):
             video_obj.seek(int(cand.start * 1000))
         elif hasattr(video_obj, 'jump_to'):
             video_obj.jump_to(int(cand.start * 1000))
+
+        current_playback_position = cand.start
+        playback_start_position = cand.start
+        playback_start_time = time_module.time()
+        stop_clip_stop_monitor()
         
         # Play
         if hasattr(video_obj, 'play'):
             video_obj.play()
             state.is_playing = True
+            start_clip_stop_monitor()
         
         render_list_items() # Update icon to Pause
         
@@ -888,6 +966,7 @@ def main(page: ft.Page):
         player_stack.controls.append(range_overlay)
         player_stack.update()
         state.is_playing = False # Sync with autoplay=False
+        stop_clip_stop_monitor()
 
     def play_clip_preview(idx):
         try:

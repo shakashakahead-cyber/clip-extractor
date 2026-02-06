@@ -4,7 +4,6 @@ numpy
 scipy
 soundfile
 ffmpeg-python
-panns-inference
 torch
 torchaudio
 torchvision

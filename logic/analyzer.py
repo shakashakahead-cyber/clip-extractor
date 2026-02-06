@@ -58,6 +58,11 @@ EXTRA_CANDIDATE_LOW_LAUGHTER_THRESHOLD = 0.12
 DISPLAY_SCORE_BASE_QUANTILE = 0.60
 DISPLAY_SCORE_TOP_QUANTILE = 0.98
 DISPLAY_SCORE_RAW_WEIGHT = 0.80
+DISPLAY_CALIB_BASE_QUANTILE = 0.15
+DISPLAY_CALIB_TOP_QUANTILE = 0.98
+DISPLAY_CALIB_RAW_WEIGHT = 0.45
+DISPLAY_CALIB_REL_WEIGHT = 0.55
+DISPLAY_CALIB_GAMMA = 0.85
 
 # Group score fusion
 GROUP_PEAK_WEIGHT = 0.40
@@ -67,6 +72,26 @@ GROUP_LAUGHTER_PEAK_WEIGHT = 0.20
 GROUP_LAUGHTER_BOOST_THRESHOLD = 0.35
 GROUP_LAUGHTER_BOOST_GAIN = 0.20
 GROUP_LAUGHTER_BOOST_CAP = 0.12
+
+# Target class weighting
+TARGET_WEIGHT_LAUGHTER = 1.00
+TARGET_WEIGHT_CORE = 0.95
+TARGET_WEIGHT_AUX = 0.60
+
+# Adaptive clip boundary
+BOUNDARY_MIN_DURATION_SEC = 14.0
+BOUNDARY_PRE_GUARD_SEC = 3.0
+BOUNDARY_POST_GUARD_SEC = 5.0
+BOUNDARY_PRE_GUARD_CAP_SEC = 6.0
+BOUNDARY_POST_GUARD_CAP_SEC = 9.0
+BOUNDARY_MAX_EXTENSION_SEC = 30.0
+BOUNDARY_DIP_TOLERANCE_SEC = 5.0
+BOUNDARY_FLOOR_RATIO_TO_END = 0.90
+BOUNDARY_FLOOR_RATIO_TO_PEAK = 0.32
+
+# Candidate NMS
+CANDIDATE_NMS_IOU_THRESHOLD = 0.55
+CANDIDATE_NMS_CENTER_SEC = 10.0
 
 
 @dataclass
@@ -84,6 +109,7 @@ class Analyzer:
     def __init__(self):
         self._target_indices: List[int] = []
         self._laughter_indices: List[int] = []
+        self._target_weights: List[float] = []
         self._class_names: List[str] = []
         self._labels_ready = False
 
@@ -96,18 +122,35 @@ class Analyzer:
 
     def _build_target_indices(self):
         targets_laughter = ["Laughter", "Belly laugh", "Chuckle, chortle", "Giggle", "Snicker"]
-        targets_other = ["Cheering", "Applause", "Clapping", "Crowd", "Battle cry", "Screaming", "Shouting", "Yell"]
+        targets_core = ["Cheering", "Applause", "Clapping"]
+        targets_aux = ["Crowd", "Battle cry", "Screaming", "Shouting", "Yell"]
 
         self._target_indices = []
         self._laughter_indices = []
+        self._target_weights = []
+        core_count = 0
+        aux_count = 0
         for i, name in enumerate(self._class_names):
             is_laughter = any(t.lower() in name.lower() for t in targets_laughter)
-            is_other = any(t.lower() in name.lower() for t in targets_other)
+            is_core = any(t.lower() in name.lower() for t in targets_core)
+            is_aux = any(t.lower() in name.lower() for t in targets_aux)
             if is_laughter:
                 self._laughter_indices.append(i)
                 self._target_indices.append(i)
-            elif is_other:
+                self._target_weights.append(TARGET_WEIGHT_LAUGHTER)
+            elif is_core:
                 self._target_indices.append(i)
+                self._target_weights.append(TARGET_WEIGHT_CORE)
+                core_count += 1
+            elif is_aux:
+                self._target_indices.append(i)
+                self._target_weights.append(TARGET_WEIGHT_AUX)
+                aux_count += 1
+
+        print(
+            "Target class mix: "
+            f"laughter={len(self._laughter_indices)}, core={core_count}, aux={aux_count}"
+        )
 
     def _load_label_metadata(self):
         if self._labels_ready:
@@ -155,6 +198,7 @@ class Analyzer:
         clipwise_output: np.ndarray,
         batch_audio: np.ndarray,
         target_indices: np.ndarray,
+        target_weights: np.ndarray,
         laughter_indices: np.ndarray,
         rms_low: float,
         rms_high: float,
@@ -165,18 +209,25 @@ class Analyzer:
 
         if has_targets:
             valid_probs = clipwise_output[:, target_indices]
-            top_peak = np.max(valid_probs, axis=1)
-            top_k = min(3, valid_probs.shape[1])
-            top_k_idx = np.argpartition(valid_probs, -top_k, axis=1)[:, -top_k:]
-            top_k_mean = np.take_along_axis(valid_probs, top_k_idx, axis=1).mean(axis=1)
+            if target_weights.size == valid_probs.shape[1]:
+                weighted_probs = valid_probs * target_weights[np.newaxis, :]
+            else:
+                weighted_probs = valid_probs
+
+            top_peak = np.max(weighted_probs, axis=1)
+            top_k = min(3, weighted_probs.shape[1])
+            top_k_idx = np.argpartition(weighted_probs, -top_k, axis=1)[:, -top_k:]
+            top_k_mean = np.take_along_axis(weighted_probs, top_k_idx, axis=1).mean(axis=1)
             score_all = (0.6 * top_peak) + (0.4 * top_k_mean)
 
-            local_max_idx = np.argmax(valid_probs, axis=1)
+            local_max_idx = np.argmax(weighted_probs, axis=1)
             top_class_scores = top_peak
+            top_class_raw_scores = valid_probs[np.arange(current_batch_len), local_max_idx]
             global_idx = target_indices[local_max_idx]
         else:
             score_all = np.zeros(current_batch_len, dtype=np.float32)
             top_class_scores = np.zeros(current_batch_len, dtype=np.float32)
+            top_class_raw_scores = np.zeros(current_batch_len, dtype=np.float32)
             global_idx = None
 
         if has_laughter:
@@ -211,7 +262,8 @@ class Analyzer:
             details = [
                 {
                     "top_class": self._class_names[int(global_idx[k])],
-                    "max_score": float(top_class_scores[k]),
+                    "max_score": float(top_class_raw_scores[k]),
+                    "max_score_weighted": float(top_class_scores[k]),
                     "score_event": float(event_score[k]),
                     "score_laughter": float(score_laughter[k]),
                     "has_laughter": bool(has_laughter_flags[k]),
@@ -223,6 +275,7 @@ class Analyzer:
                 {
                     "top_class": "Unknown",
                     "max_score": 0.0,
+                    "max_score_weighted": 0.0,
                     "score_event": float(event_score[k]),
                     "score_laughter": float(score_laughter[k]),
                     "has_laughter": bool(has_laughter_flags[k]),
@@ -299,6 +352,163 @@ class Analyzer:
             "is_extra_candidate": bool(is_extra),
         }
         return score, score_breakdown
+
+    def _adaptive_segment_bounds(
+        self,
+        final_scores: np.ndarray,
+        times: np.ndarray,
+        g_start_idx: int,
+        g_end_idx: int,
+        peak_idx: int,
+        threshold_end: float,
+        duration: float,
+        base_pre_padding: float,
+        base_post_padding: float,
+    ) -> Tuple[float, float]:
+        if final_scores.size == 0:
+            return 0.0, 0.0
+
+        left = int(g_start_idx)
+        right = int(g_end_idx)
+        peak_score = float(final_scores[peak_idx])
+        boundary_floor = max(
+            MIN_ABSOLUTE_SCORE * 0.70,
+            threshold_end * BOUNDARY_FLOOR_RATIO_TO_END,
+            peak_score * BOUNDARY_FLOOR_RATIO_TO_PEAK,
+        )
+        dip_allow = max(1, int(round(BOUNDARY_DIP_TOLERANCE_SEC / HOP_SECONDS)))
+        max_expand_steps = max(1, int(round(BOUNDARY_MAX_EXTENSION_SEC / HOP_SECONDS)))
+
+        # Expand to left while allowing small low-score dips to keep narrative flow.
+        dips = 0
+        steps = 0
+        idx = left
+        while idx > 0 and steps < max_expand_steps:
+            idx -= 1
+            steps += 1
+            score_val = float(final_scores[idx])
+            if score_val >= boundary_floor:
+                left = idx
+                dips = 0
+                continue
+            dips += 1
+            if dips <= dip_allow:
+                left = idx
+                continue
+            break
+
+        # Expand to right with the same dip tolerance.
+        dips = 0
+        steps = 0
+        idx = right
+        while idx + 1 < final_scores.size and steps < max_expand_steps:
+            idx += 1
+            steps += 1
+            score_val = float(final_scores[idx])
+            if score_val >= boundary_floor:
+                right = idx
+                dips = 0
+                continue
+            dips += 1
+            if dips <= dip_allow:
+                right = idx
+                continue
+            break
+
+        half_window = WINDOW_SECONDS / 2.0
+        pre_guard = max(BOUNDARY_PRE_GUARD_SEC, min(base_pre_padding, BOUNDARY_PRE_GUARD_CAP_SEC))
+        post_guard = max(BOUNDARY_POST_GUARD_SEC, min(base_post_padding, BOUNDARY_POST_GUARD_CAP_SEC))
+        start = max(0.0, float(times[left]) - half_window - pre_guard)
+        end = min(duration, float(times[right]) + half_window + post_guard)
+
+        if end - start < BOUNDARY_MIN_DURATION_SEC:
+            deficit = BOUNDARY_MIN_DURATION_SEC - (end - start)
+            start = max(0.0, start - (deficit * 0.40))
+            end = min(duration, end + (deficit * 0.60))
+            if end - start < BOUNDARY_MIN_DURATION_SEC:
+                if start <= 0.0:
+                    end = min(duration, start + BOUNDARY_MIN_DURATION_SEC)
+                elif end >= duration:
+                    start = max(0.0, end - BOUNDARY_MIN_DURATION_SEC)
+
+        return start, end
+
+    @staticmethod
+    def _segment_iou(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+        inter = max(0.0, min(a_end, b_end) - max(a_start, b_start))
+        if inter <= 0.0:
+            return 0.0
+        union = max(1e-6, (a_end - a_start) + (b_end - b_start) - inter)
+        return inter / union
+
+    def _suppress_duplicate_candidates(self, candidates: List[HighlightCandidate]) -> Tuple[List[HighlightCandidate], int]:
+        if len(candidates) <= 1:
+            return candidates, 0
+
+        order = sorted(range(len(candidates)), key=lambda i: candidates[i].score, reverse=True)
+        kept: List[HighlightCandidate] = []
+        removed = 0
+        for idx in order:
+            cand = candidates[idx]
+            if cand.end <= cand.start:
+                removed += 1
+                continue
+
+            center = (cand.start + cand.end) * 0.5
+            is_duplicate = False
+            for kept_cand in kept:
+                iou = self._segment_iou(cand.start, cand.end, kept_cand.start, kept_cand.end)
+                kept_center = (kept_cand.start + kept_cand.end) * 0.5
+                center_dist = abs(center - kept_center)
+                overlaps = min(cand.end, kept_cand.end) > max(cand.start, kept_cand.start)
+                if iou >= CANDIDATE_NMS_IOU_THRESHOLD:
+                    is_duplicate = True
+                    break
+                if overlaps and center_dist < CANDIDATE_NMS_CENTER_SEC:
+                    is_duplicate = True
+                    break
+
+            if is_duplicate:
+                removed += 1
+                continue
+            kept.append(cand)
+
+        kept.sort(key=lambda x: x.start)
+        return kept, removed
+
+    def _calibrate_candidate_display_scores(self, candidates: List[HighlightCandidate]) -> Tuple[float, float]:
+        if not candidates:
+            return 0.0, 0.0
+
+        raw_scores = np.asarray(
+            [float(np.clip(c.score, 0.0, 1.0)) for c in candidates],
+            dtype=np.float32,
+        )
+        raw_max = float(np.max(raw_scores))
+
+        if raw_scores.size == 1:
+            display_scores = raw_scores.copy()
+        else:
+            base = float(np.quantile(raw_scores, DISPLAY_CALIB_BASE_QUANTILE))
+            top = float(np.quantile(raw_scores, DISPLAY_CALIB_TOP_QUANTILE))
+            span = max(1e-6, top - base)
+            rel = np.clip((raw_scores - base) / span, 0.0, 1.0)
+            display_scores = np.clip(
+                (DISPLAY_CALIB_RAW_WEIGHT * raw_scores)
+                + (DISPLAY_CALIB_REL_WEIGHT * np.power(rel, DISPLAY_CALIB_GAMMA)),
+                0.0,
+                1.0,
+            )
+
+        display_max = float(np.max(display_scores))
+        for idx, cand in enumerate(candidates):
+            if cand.details is None:
+                cand.details = {}
+            else:
+                cand.details = dict(cand.details)
+            cand.details["score_raw"] = round(float(raw_scores[idx]), 4)
+            cand.score = round(float(display_scores[idx]), 4)
+        return raw_max, display_max
 
     def _build_active_mask(self, scores: np.ndarray) -> Tuple[np.ndarray, float, float]:
         if scores.size == 0:
@@ -513,6 +723,7 @@ class Analyzer:
             return []
 
         target_indices = np.asarray(self._target_indices, dtype=np.int64)
+        target_weights = np.asarray(self._target_weights, dtype=np.float32)
         laughter_indices = np.asarray(self._laughter_indices, dtype=np.int64)
 
         times = (np.arange(num_windows) * hop_samples + (window_samples / 2.0)) / SAMPLE_RATE
@@ -549,6 +760,7 @@ class Analyzer:
                 clipwise_output=clipwise_output,
                 batch_audio=batch_windows,
                 target_indices=target_indices,
+                target_weights=target_weights,
                 laughter_indices=laughter_indices,
                 rms_low=rms_low,
                 rms_high=rms_high,
@@ -623,7 +835,6 @@ class Analyzer:
         pre_padding = min(8.0, max(3.0, padding * 0.25))
         post_padding = max(10.0, padding)
 
-        half_window = WINDOW_SECONDS / 2.0
         for g_start_idx, g_end_idx in groups:
             group_indices = np.arange(g_start_idx, g_end_idx + 1)
             peak_idx = int(group_indices[np.argmax(final_scores[group_indices])])
@@ -645,10 +856,17 @@ class Analyzer:
                 )
             )
 
-            center_start = float(times[g_start_idx])
-            center_end = float(times[g_end_idx])
-            s = max(0.0, center_start - half_window - pre_padding)
-            e = min(duration, center_end + half_window + post_padding)
+            s, e = self._adaptive_segment_bounds(
+                final_scores=final_scores,
+                times=times,
+                g_start_idx=g_start_idx,
+                g_end_idx=g_end_idx,
+                peak_idx=peak_idx,
+                threshold_end=threshold_end,
+                duration=duration,
+                base_pre_padding=pre_padding,
+                base_post_padding=post_padding,
+            )
 
             det = window_details[peak_idx] if peak_idx < len(window_details) else None
             if det is None:
@@ -664,6 +882,14 @@ class Analyzer:
                     details=det,
                 )
             )
+
+        candidates, removed_count = self._suppress_duplicate_candidates(candidates)
+        if removed_count > 0:
+            print(f"NMS removed {removed_count} overlapping candidates.")
+
+        raw_max, display_max = self._calibrate_candidate_display_scores(candidates)
+        if candidates:
+            print(f"Candidate scores: raw_max={raw_max:.3f}, display_max={display_max:.3f}")
 
         candidates.sort(key=lambda x: x.start)
         if progress_cb:
